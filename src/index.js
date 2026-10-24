@@ -20,7 +20,7 @@
 
 // Bump this string whenever you edit this file. It prints on every request,
 // so `wrangler tail` proves which version is actually live.
-const BUILD = "council-v9 built 2026-10-24T11:04:39Z";
+const BUILD = "council-v10 built 2026-10-24T11:04:39Z";
 
 const DEFAULTS = {
   OPENAI_MODEL: "gpt-5.6",
@@ -34,6 +34,20 @@ const DEFAULTS = {
   CLAUDE_MAX_TOKENS: "16000",
   // "", low, medium, high, xhigh, max. Lower effort = less thinking = faster.
   CLAUDE_EFFORT: "low",
+  // USD per MILLION tokens, as "model-prefix:input:output". Longest matching
+  // prefix wins, so claude-opus-5-5 beats claude-opus-5. A model missing here
+  // is still counted in tokens; its cost shows as "?" rather than a wrong
+  // number. Rates change — check them when you change a model.
+  PRICES: [
+    "gpt-6-astra:5:40",
+    "gpt-5.6-terra:2:12",
+    "gpt-5.6-luna:0.20:1.20",
+    "gpt-5.6:5:30",
+    "claude-opus-5-5:4:20",
+    "claude-opus-5:5:25",
+    "claude-sonnet-5-5:2:10",
+    "claude-haiku-5-5:0.10:0.50",
+  ].join(","),
   // The synthesizer's instructions. The user has already read all four answers,
   // so restating them is the main source of bloat — this forbids it.
   SYNTH_SYSTEM: [
@@ -120,7 +134,11 @@ function openAiStyle({ label, url, keyVar, modelKey }) {
       signal: AbortSignal.timeout(timeoutMs(env)),
     });
     const data = await readJson(res, label);
-    return (data.choices?.[0]?.message?.content ?? "").trim();
+    return {
+      text: (data.choices?.[0]?.message?.content ?? "").trim(),
+      inTok: data.usage?.prompt_tokens ?? 0,
+      outTok: data.usage?.completion_tokens ?? 0,
+    };
   };
 }
 
@@ -192,7 +210,11 @@ async function callClaude(prompt, env, modelOverride, system) {
     }
     throw new Error(`Anthropic returned no text (stop_reason: ${data.stop_reason})`);
   }
-  return text;
+  return {
+    text,
+    inTok: data.usage?.input_tokens ?? 0,
+    outTok: data.usage?.output_tokens ?? 0,
+  };
 }
 
 async function callGemini(prompt, env, modelOverride, system) {
@@ -217,7 +239,13 @@ async function callGemini(prompt, env, modelOverride, system) {
   if (!text) {
     throw new Error(`Gemini returned no text (finishReason: ${data?.candidates?.[0]?.finishReason ?? "unknown"})`);
   }
-  return text;
+  const um = data.usageMetadata ?? {};
+  return {
+    text,
+    inTok: um.promptTokenCount ?? 0,
+    // Gemini bills thinking separately from the visible answer; both are output.
+    outTok: (um.candidatesTokenCount ?? 0) + (um.thoughtsTokenCount ?? 0),
+  };
 }
 
 const PROVIDERS = {
@@ -241,6 +269,79 @@ function statusPayload(env) {
     synthesizer: { provider: cfg(env, "SYNTH_PROVIDER"), model: cfg(env, "SYNTH_MODEL") },
     timeout_ms: timeoutMs(env),
   };
+}
+
+// ---------------------------------------------------------------------------
+// Spend ledger
+// ---------------------------------------------------------------------------
+
+/** USD cost of one call, or null when the model isn't in the price table. */
+function priceOf(model, inTok, outTok, env) {
+  let best = null;
+  for (const row of String(cfg(env, "PRICES")).split(",")) {
+    const [prefix, inRate, outRate] = row.trim().split(":");
+    if (!prefix || !model.startsWith(prefix)) continue;
+    if (!best || prefix.length > best.prefix.length) {
+      best = { prefix, inRate: Number(inRate), outRate: Number(outRate) };
+    }
+  }
+  if (!best) return null;
+  return (inTok * best.inRate + outTok * best.outRate) / 1e6;
+}
+
+const monthKey = () => `spend:${new Date().toISOString().slice(0, 7)}`;
+
+/**
+ * Add this run's usage to the current month's ledger. One read, one write.
+ * Silently does nothing when no KV namespace is bound — tracking is a
+ * convenience and must never break a council run.
+ */
+async function recordSpend(entries, env) {
+  if (!env.COUNCIL_KV) return;
+  try {
+    const key = monthKey();
+    const ledger = (await env.COUNCIL_KV.get(key, "json")) ?? {
+      since: new Date().toISOString(),
+      runs: 0,
+      providers: {},
+    };
+    ledger.runs += 1;
+
+    for (const e of entries) {
+      if (!e?.model) continue;
+      const row = (ledger.providers[e.name] ??= { calls: 0, inTok: 0, outTok: 0, usd: 0, unpriced: 0 });
+      row.calls += 1;
+      row.inTok += e.inTok ?? 0;
+      row.outTok += e.outTok ?? 0;
+      row.model = e.model; // latest model seen, for the report
+      const usd = priceOf(e.model, e.inTok ?? 0, e.outTok ?? 0, env);
+      if (usd === null) row.unpriced += 1;
+      else row.usd += usd;
+    }
+    await env.COUNCIL_KV.put(key, JSON.stringify(ledger));
+  } catch (err) {
+    console.log(`spend ledger write failed: ${err?.message ?? err}`);
+  }
+}
+
+function formatSpend(ledger, env) {
+  if (!ledger) return "No spend recorded this month yet.";
+  const lines = [`Since ${ledger.since.slice(0, 10)} \u2014 ${ledger.runs} runs`, ""];
+  let total = 0;
+  for (const name of [...ORDER, "synthesis"]) {
+    const r = ledger.providers[name];
+    if (!r) continue;
+    total += r.usd;
+    const label = name === "synthesis" ? "Synthesis" : PROVIDERS[name].label;
+    const cost = r.unpriced ? `$${r.usd.toFixed(2)}+?` : `$${r.usd.toFixed(2)}`;
+    const k = (n) => (n >= 1000 ? `${Math.round(n / 1000)}k` : String(n));
+    lines.push(`${label.padEnd(10)} ${cost.padStart(8)}  ${k(r.inTok)}in ${k(r.outTok)}out`);
+  }
+  lines.push("", `TOTAL      ${`$${total.toFixed(2)}`.padStart(8)}`);
+  if (Object.values(ledger.providers).some((r) => r.unpriced)) {
+    lines.push("", "? = a model with no entry in PRICES; tokens counted, cost not.");
+  }
+  return lines.join("\n");
 }
 
 // ---------------------------------------------------------------------------
@@ -312,8 +413,14 @@ async function synthesize(prompt, transcript, env) {
         : cfg(env, PROVIDERS[provider].modelKey);
     const input = `The user asked:\n${prompt}\n\nThe independent answers:\n\n${transcript}`;
     try {
-      const text = await synthesizeWith(provider, model, input, env);
-      return { text, model, fellBackFrom: provider === configured ? null : configured };
+      const r = await synthesizeWith(provider, model, input, env);
+      return {
+        text: r.text,
+        model,
+        inTok: r.inTok,
+        outTok: r.outTok,
+        fellBackFrom: provider === configured ? null : configured,
+      };
     } catch (err) {
       errors.push(`${provider}: ${err?.message ?? err}`);
     }
@@ -330,10 +437,15 @@ async function runOne(name, prompt, chatId, env) {
   mark(`${p.label} start`, clock);
   let answer;
   let ok = true;
+  let inTok = 0;
+  let outTok = 0;
   try {
     // Same system prompt to all four, so every answer comes back comparably
     // short and the only thing you type is your question.
-    answer = await p.call(prompt, env, undefined, cfg(env, "COUNCIL_SYSTEM") || undefined);
+    const r = await p.call(prompt, env, undefined, cfg(env, "COUNCIL_SYSTEM") || undefined);
+    answer = r.text;
+    inTok = r.inTok;
+    outTok = r.outTok;
   } catch (err) {
     answer = `[ERROR from ${p.label}: ${err?.message ?? err}]`;
     ok = false;
@@ -350,7 +462,7 @@ async function runOne(name, prompt, chatId, env) {
     /* delivery failed; the answer still counts toward the synthesis */
   }
 
-  return { name, label: p.label, model, answer, ok };
+  return { name, label: p.label, model, answer, ok, inTok, outTok };
 }
 
 async function runCouncil(prompt, chatId, env, { synthesize: doSynth = true } = {}) {
@@ -366,7 +478,10 @@ async function runCouncil(prompt, chatId, env, { synthesize: doSynth = true } = 
   mark("all four returned", clock);
   const results = settled.filter((s) => s.status === "fulfilled").map((s) => s.value);
 
-  if (!doSynth) return;
+  if (!doSynth) {
+    await recordSpend(results, env);
+    return;
+  }
 
   const good = results.filter((r) => r.ok);
   const failed = results.filter((r) => !r.ok).map((r) => r.label);
@@ -400,8 +515,10 @@ async function runCouncil(prompt, chatId, env, { synthesize: doSynth = true } = 
   // synthesis to a fresh invocation of this same Worker so it gets its own
   // full budget. The dispatch returns immediately; the work continues there.
   mark("starting synthesis", clock);
-  await runSynthesis({ chatId, prompt, transcript, failed, count: good.length }, env);
+  const synthUsage = await runSynthesis({ chatId, prompt, transcript, failed, count: good.length }, env);
   mark("synthesis complete", clock);
+
+  await recordSpend([...results, synthUsage].filter(Boolean), env);
 }
 
 /** Reconcile the answers and post the result. */
@@ -411,11 +528,13 @@ async function runSynthesis({ chatId, prompt, transcript, failed = [], count }, 
 
   let header = "";
   let synthesis;
+  let usage = null;
   try {
     mark("calling synthesizer", clock);
     const out = await synthesize(prompt, transcript, env);
     mark("synthesizer returned", clock);
     synthesis = out.text;
+    usage = { name: "synthesis", model: out.model, inTok: out.inTok, outTok: out.outTok };
     header = `SYNTHESIS (${out.model}`;
     header += out.fellBackFrom ? `, fallback \u2014 ${out.fellBackFrom} failed)` : ")";
   } catch (err) {
@@ -435,12 +554,15 @@ async function runSynthesis({ chatId, prompt, transcript, failed = [], count }, 
       /* nothing further we can do from here */
     }
   }
+  return usage;
 }
 
 const HELP = `Send any message and I'll ask ChatGPT, Claude, DeepSeek and Gemini, then post a synthesis.
 
 /raw <prompt>          four answers, no synthesis (faster, cheaper)
 /ask <model> <prompt>  one model only: chatgpt | claude | deepseek | gemini
+/spend                 what this bot has cost you this month
+/spend reset           clear the month's ledger
 /status                configured models and keys
 /help                  this message`;
 
@@ -458,6 +580,18 @@ async function handleMessage(text, chatId, env) {
     lines.push(`Timeout   ${s.timeout_ms / 1000}s`);
     lines.push(`Build     ${s.build}`);
     return sendTelegram(chatId, lines.join("\n"), env);
+  }
+
+  if (text.startsWith("/spend")) {
+    if (!env.COUNCIL_KV) {
+      return sendTelegram(chatId, "Spend tracking is off — no KV namespace bound. See README.", env);
+    }
+    if (text.includes("reset")) {
+      await env.COUNCIL_KV.delete(monthKey());
+      return sendTelegram(chatId, "This month's ledger cleared.", env);
+    }
+    const ledger = await env.COUNCIL_KV.get(monthKey(), "json");
+    return sendTelegram(chatId, formatSpend(ledger, env), env);
   }
 
   if (text.startsWith("/raw")) {

@@ -8,11 +8,19 @@ compatibility_date = "2026-09-01"
 #   platform.claude.com/docs
 #   api-docs.deepseek.com
 #   ai.google.dev        (gemini-2.5-* shuts down 16 Oct 2026)
+# Spend ledger storage. Create it once with:
+#   npx wrangler kv namespace create COUNCIL_KV
+# then paste the id it prints below. Without this block the bot still works;
+# /spend just reports that tracking is off.
+[[kv_namespaces]]
+binding = "COUNCIL_KV"
+id = "e1562bf0425f46c197960786b7f799eb"
+
 [vars]
 OPENAI_MODEL = "gpt-5.6-terra"
 CLAUDE_MODEL = "claude-sonnet-5-5"
 DEEPSEEK_MODEL = "deepseek-flash"
-GEMINI_MODEL = "gemini-3.8-flash"
+GEMINI_MODEL = "gemini-3-flash-preview"
 
 # Who reconciles the four answers. chatgpt | claude | deepseek | gemini
 SYNTH_PROVIDER = "claude"
@@ -39,3 +47,9 @@ COUNCIL_SYSTEM = """Answer in 120 words or fewer. Lead with your verdict or dire
 # four answers you already read, so this forbids it. Lower the word cap or
 # delete a numbered section to shorten further.
 SYNTH_SYSTEM = """You are reconciling independent answers from several AI models that could not see each other's work. The user has already read every one of them. Total 150 words or fewer. Plain text only: no markdown, no asterisks, no headers. Write, in this order: 1. The verdict, in one or two sentences. Do not restate, summarize or recap what the models said. 2. DISAGREEMENTS: real factual conflicts only, one line each. Ignore differences of wording or emphasis. 3. SINGLE-SOURCE: claims only one model made, one line each, each marked likely-real or likely-invented. 4. UNVERIFIED: figures or dates you cannot confirm, one line total. Omit any section that would be empty rather than writing none. If the models agreed and added nothing to each other, say exactly that in one line and stop. Treat all models equally; one may share your own model family, which earns it nothing. Agreement between models is weak evidence, never verification."""
+
+# USD per MILLION tokens as "model-prefix:input:output". Longest matching prefix
+# wins, so claude-opus-5-5 beats claude-opus-5. A model that isn't listed is
+# still counted in tokens; its cost shows as "?" instead of a wrong number.
+# Add your DeepSeek and Gemini rates here once you look them up.
+PRICES = "gpt-6-astra:5:40,gpt-5.6-terra:2:12,gpt-5.6-luna:0.20:1.20,gpt-5.6:5:30,claude-opus-5-5:4:20,claude-opus-5:5:25,claude-sonnet-5-5:2:10,claude-haiku-5-5:0.10:0.50"

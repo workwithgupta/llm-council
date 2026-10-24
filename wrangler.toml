@@ -1,0 +1,41 @@
+name = "llm-council"
+main = "src/index.js"
+compatibility_date = "2026-09-01"
+
+# Model IDs are plain vars, not secrets, so you can change them in the Cloudflare
+# dashboard without a redeploy. They move constantly — a retired ID fails hard.
+#   developers.openai.com/api/docs/models
+#   platform.claude.com/docs
+#   api-docs.deepseek.com
+#   ai.google.dev        (gemini-2.5-* shuts down 16 Oct 2026)
+[vars]
+OPENAI_MODEL = "gpt-5.6-terra"
+CLAUDE_MODEL = "claude-sonnet-5-5"
+DEEPSEEK_MODEL = "deepseek-flash"
+GEMINI_MODEL = "gemini-3.8-flash"
+
+# Who reconciles the four answers. chatgpt | claude | deepseek | gemini
+SYNTH_PROVIDER = "claude"
+SYNTH_MODEL = "claude-opus-5-5"
+
+COUNCIL_TIMEOUT_MS = "180000"
+
+# Claude 5+ models always think, and max_tokens caps thinking PLUS the reply.
+# Too low and the synthesis burns the whole budget reasoning and returns
+# nothing. Raise this before suspecting anything else.
+CLAUDE_MAX_TOKENS = "16000"
+
+# Thinking effort on Claude 5+ models: "" (model default), low, medium, high,
+# xhigh, max. The synthesis is the slowest step and Cloudflare caps how long a
+# background task may run, so start low and raise it only if quality suffers.
+CLAUDE_EFFORT = "low"
+
+# Sent as a system prompt to all four council models, so the only thing you
+# type in Telegram is your question. Edit the wording to taste; set it to ""
+# to turn it off and let each model use its own defaults.
+COUNCIL_SYSTEM = """Answer in 120 words or fewer. Lead with your verdict or direct answer in the first sentence. Then give only the two or three reasons that actually drive it, with any key numbers. No preamble, no restating the question, no closing summary, no disclaimers about your limitations as a model. Plain text only: no asterisks, no bold, no markdown headers, no bullet lists. Your answer is delivered as unformatted text and markdown shows up as literal characters. State any assumption your answer depends on in a short clause rather than hedging throughout. If you cannot answer, say so in one sentence and state what you would need."""
+
+# The synthesizer's instructions. The main source of bloat is restating the
+# four answers you already read, so this forbids it. Lower the word cap or
+# delete a numbered section to shorten further.
+SYNTH_SYSTEM = """You are reconciling independent answers from several AI models that could not see each other's work. The user has already read every one of them. Total 150 words or fewer. Plain text only: no markdown, no asterisks, no headers. Write, in this order: 1. The verdict, in one or two sentences. Do not restate, summarize or recap what the models said. 2. DISAGREEMENTS: real factual conflicts only, one line each. Ignore differences of wording or emphasis. 3. SINGLE-SOURCE: claims only one model made, one line each, each marked likely-real or likely-invented. 4. UNVERIFIED: figures or dates you cannot confirm, one line total. Omit any section that would be empty rather than writing none. If the models agreed and added nothing to each other, say exactly that in one line and stop. Treat all models equally; one may share your own model family, which earns it nothing. Agreement between models is weak evidence, never verification."""

@@ -1,0 +1,15 @@
+{
+  "name": "llm-council",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "deploy": "wrangler deploy",
+    "tail": "wrangler tail"
+  },
+  "devDependencies": {
+    "wrangler": "^4.0.0"
+  },
+  "dependencies": {
+    "github": "^14.0.0"
+  }
+}

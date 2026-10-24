@@ -3,6 +3,7 @@
 A personal Telegram bot. Send one message; it asks **ChatGPT, Claude, DeepSeek and
 Gemini** in parallel, posts each raw answer as it lands, then posts a synthesis that
 reconciles all four.
+Models selected are based on testing to optimize cost.
 
 Runs on Cloudflare Workers' free tier. You pay only for API tokens.
 
